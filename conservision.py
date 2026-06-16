@@ -23,7 +23,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import torch.optim as optim
 from pytorch_pretrained_vit import ViT
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.metrics import log_loss
 
 
@@ -87,7 +87,9 @@ class LoRA_ViT(nn.Module):
 
 # %%
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"device: {device}")
+gpu_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+batch_size = 64 if "A100" in gpu_name else 32
+print(f"device: {device} ({gpu_name}), batch_size: {batch_size}")
 
 backbone = ViT("B_16", pretrained=True)
 IMG_SIZE = backbone.image_size
@@ -106,16 +108,26 @@ species_labels = sorted(train_labels.columns.unique())
 frac = 1.0
 y = train_labels.sample(frac=frac, random_state=1)
 x = train_features.loc[y.index].filepath.to_frame()
-x_train, x_eval, y_train, y_eval = train_test_split(x, y, stratify=y, test_size=0.25)
+sites = train_features.loc[y.index, "site"]
+gss = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=1)
+train_idx, eval_idx = next(gss.split(x, y, groups=sites))
+x_train, x_eval = x.iloc[train_idx], x.iloc[eval_idx]
+y_train, y_eval = y.iloc[train_idx], y.iloc[eval_idx]
 
 # %%
 class ImagesDataset(Dataset):
-    def __init__(self, x_df, y_df=None):
+    def __init__(self, x_df, y_df=None, augment=False):
         self.data = x_df
         self.label = y_df
+        aug = (
+            [transforms.RandomHorizontalFlip(), transforms.ColorJitter(0.2, 0.2, 0.2)]
+            if augment
+            else []
+        )
         self.transform = transforms.Compose(
-            [
-                transforms.Resize((IMG_SIZE, IMG_SIZE)),
+            [transforms.Resize((IMG_SIZE, IMG_SIZE))]
+            + aug
+            + [
                 transforms.ToTensor(),
                 transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
             ]
@@ -136,12 +148,16 @@ class ImagesDataset(Dataset):
         return len(self.data)
 
 # %%
-train_dataset = ImagesDataset(x_train, y_train)
-train_dataloader = DataLoader(train_dataset, batch_size=32)
+train_dataset = ImagesDataset(x_train, y_train, augment=True)
+train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
 # %%
 model = LoRA_ViT(backbone, r=4, num_classes=8).to(device)
-criterion = nn.CrossEntropyLoss()
+counts = y_train[species_labels].sum().values
+weights = torch.tensor(
+    counts.sum() / (len(counts) * counts), dtype=torch.float, device=device
+)
+criterion = nn.CrossEntropyLoss(weight=weights)
 optimizer = optim.AdamW(
     filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3, weight_decay=1e-4
 )
@@ -162,7 +178,7 @@ torch.save(model, "model.pth")
 
 # %%
 eval_dataset = ImagesDataset(x_eval, y_eval)
-eval_dataloader = DataLoader(eval_dataset, batch_size=32)
+eval_dataloader = DataLoader(eval_dataset, batch_size=batch_size, num_workers=8, pin_memory=True)
 
 preds_collector = []
 model.eval()
