@@ -105,7 +105,7 @@ train_labels = pd.read_csv("train_labels.csv", index_col="id")
 species_labels = sorted(train_labels.columns.unique())
 
 # %%
-frac = 1.0
+frac = 0.2
 y = train_labels.sample(frac=frac, random_state=1)
 x = train_features.loc[y.index].filepath.to_frame()
 sites = train_features.loc[y.index, "site"]
@@ -152,7 +152,7 @@ train_dataset = ImagesDataset(x_train, y_train, augment=True)
 train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
 # %%
-model = LoRA_ViT(backbone, r=4, num_classes=8).to(device)
+model = LoRA_ViT(backbone, r=16, num_classes=8).to(device)
 counts = y_train[species_labels].sum().values
 weights = torch.tensor(
     counts.sum() / (len(counts) * counts), dtype=torch.float, device=device
@@ -163,7 +163,7 @@ optimizer = optim.AdamW(
 )
 
 # %%
-num_epochs = 20
+num_epochs = 2
 for epoch in range(1, num_epochs + 1):
     print(f"Starting epoch {epoch}")
     for batch_n, batch in tqdm(enumerate(train_dataloader), total=len(train_dataloader)):

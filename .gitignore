@@ -1,19 +1,4 @@
-# competition data — DrivenData rules forbid redistribution
-data/
-*.zip
-train_features/
-test_features/
-*.csv
-
-# generated from conservision.py
-conservision.ipynb
-
-# DrivenData's original benchmark (ships in the data zip, not my code)
-benchmark*.ipynb
-
-# env & artifacts
-.venv/
-__pycache__/
+_pycache__/
 *.pyc
 model.pth
 submission_df.csv
