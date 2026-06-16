@@ -4,5 +4,3 @@ model.pth
 submission_df.csv
 outputs/
 
-# no generated notebooks
-conservision.ipynb
