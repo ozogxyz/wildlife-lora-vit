@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Runs ON the pod. Needs GH_PAT and HF_TOKEN in the environment (pod.sh passes them).
+# Runs ON the pod. Restores the ephemeral python env (fovea+deps) after every
+# pod start; data/weights persist on the volume. GH_PAT falls back to the copy
+# stored on the volume, so a restart needs no tokens. HF_TOKEN only needed to
+# seed data the first time.
 set -e
+: "${GH_PAT:=$(cat /workspace/.ghpat 2>/dev/null)}"
 
 # opencv needs these system libs
 apt-get update -qq && apt-get install -y -qq libgl1 libglib2.0-0 >/dev/null
