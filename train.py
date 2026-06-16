@@ -1,9 +1,4 @@
-"""Conser-vision LoRA-ViT. Headless: `colab exec -s dd -f train.py`.
-Assumes data at /content/data and fovea on /content (session setup does both)."""
 import os
-import sys
-
-sys.path.insert(0, "/content")  # uploaded fovea
 
 import cv2
 import numpy as np
@@ -20,13 +15,16 @@ from sklearn.metrics import log_loss
 
 from fovea import LoRA_ViT, ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
-DATA_DIR = "/content/data"
-RANK = 8
+DATA_DIR = os.environ.get("DATA_DIR", "/workspace/data")
+OUT = os.environ.get("OUT", "/workspace/best.pth")
+os.environ.setdefault("TORCH_HOME", "/workspace/.torch")  # cache ViT weights on the volume
+RANK = int(os.environ.get("RANK", 8))
 NUM_CLASSES = 8
-FRAC = 0.005
+FRAC = float(os.environ.get("FRAC", 1.0))
 TEST_SIZE = 0.25
-EPOCHS = 1
-LR = 1e-3
+EPOCHS = int(os.environ.get("EPOCHS", 5))
+LR = float(os.environ.get("LR", 1e-3))
+BATCH_SIZE = int(os.environ.get("BATCH", 32))
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.1
 SEED = 1
@@ -36,9 +34,8 @@ NORM_STD = 0.5
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 gpu = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 64 if "A100" in gpu else 32
 NUM_WORKERS = os.cpu_count() or 2
-print(f"device: {device} ({gpu}), batch {BATCH_SIZE}, workers {NUM_WORKERS}")
+print(f"device: {device} ({gpu}), batch {BATCH_SIZE}, workers {NUM_WORKERS}, frac {FRAC}, epochs {EPOCHS}")
 
 backbone = ViT("B_16", pretrained=True)
 IMG_SIZE = backbone.image_size
@@ -129,5 +126,15 @@ for epoch in range(1, EPOCHS + 1):
     print(f"epoch {epoch:2d}  train_loss {loss.item():.4f}  eval_logloss {ll:.4f}")
     if ll < best_ll:
         best_ll = ll
-        torch.save(model.state_dict(), "/content/best.pth")
+        torch.save(model.state_dict(), OUT)
 print(f"best eval log loss: {best_ll:.4f}")
+
+model.load_state_dict(torch.load(OUT))
+_, preds_df = evaluate()
+true = y_eval.idxmax(axis=1)
+pred = preds_df.idxmax(axis=1)
+print(f"best eval accuracy: {(pred == true).mean():.4f}")
+for sp in species_labels:
+    m = true == sp
+    if m.sum():
+        print(f"  {sp:18s} {(pred[m] == true[m]).mean():.3f}  (n={m.sum()})")
