@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Thin wrapper over runpodctl — never touch pod IDs or GPU-availability retries.
+#   ./pod up                 create a pod (retries GPUs), attach volume, bootstrap
+#   ./pod train [VAR=val ...] run train.py in tmux (e.g. ./pod train FRAC=0.05 EPOCHS=2)
+#   ./pod tail               follow the training log
+#   ./pod ssh                shell on the pod
+#   ./pod down               delete the pod (volume + data persist)
+set -euo pipefail
+cd "$(dirname "$0")"
+
+KEY=~/.runpod/ssh/runpodctl-ssh-key
+VOLUME=kvj2sqrijc
+IDFILE=.podid
+GPUS=("NVIDIA RTX 2000 Ada Generation" "NVIDIA RTX A5000" "NVIDIA A40" "NVIDIA RTX A6000" "NVIDIA A100-SXM4-80GB")
+rp(){ runpodctl "$@"; }
+pid(){ cat "$IDFILE" 2>/dev/null; }
+
+ssh_into(){
+  [ -s "$IDFILE" ] || { echo "no pod — run: ./pod up"; exit 1; }
+  until info=$(rp ssh info "$(pid)" 2>/dev/null) && ! grep -q "not ready" <<<"$info"; do sleep 5; done
+  IP=$(grep -oP '"ip":\s*"\K[^"]+' <<<"$info"); PORT=$(grep -oP '"port":\s*\K[0-9]+' <<<"$info")
+  SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new root@"$IP" -p "$PORT")
+}
+
+boot(){
+  ssh_into
+  local gh hf
+  gh=$(grep -oP 'GH_PAT=\K.*' .env)
+  hf=$(python3 -c 'from huggingface_hub import get_token; print(get_token() or "")')
+  scp -i "$KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new -q bootstrap.sh train.py root@"$IP":/workspace/
+  "${SSH[@]}" "cd /workspace && GH_PAT='$gh' HF_TOKEN='$hf' bash bootstrap.sh"
+  echo "[pod] ready. train: ./pod train FRAC=0.05 EPOCHS=2"
+}
+
+case "${1:-}" in
+  up)
+    for g in "${GPUS[@]}"; do
+      out=$(rp pod create --name dd --template-id runpod-torch-v280 --gpu-id "$g" \
+            --cloud-type SECURE --container-disk-in-gb 30 --ports "22/tcp" \
+            --network-volume-id "$VOLUME" 2>&1) || true
+      id=$(grep -oP '"id":\s*"\K[^"]+' <<<"$out" | head -1)
+      [ -n "$id" ] && { echo "$id" > "$IDFILE"; echo "[pod] up: $g"; break; }
+    done
+    [ -s "$IDFILE" ] || { echo "no GPUs free in the volume's DC right now — retry shortly"; exit 1; }
+    boot ;;
+  boot)  boot ;;
+  train)
+    shift; ssh_into
+    scp -i "$KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new -q train.py root@"$IP":/workspace/
+    "${SSH[@]}" "cd /workspace && tmux kill-session -t t 2>/dev/null; tmux new-session -d -s t '$* python3 -u train.py 2>&1 | tee train.log'"
+    echo "[pod] training in tmux. follow: ./pod tail" ;;
+  tail)  ssh_into; exec "${SSH[@]}" "tail -f /workspace/train.log" ;;
+  ssh)   ssh_into; exec "${SSH[@]}" ;;
+  down)  [ -s "$IDFILE" ] && rp pod delete "$(pid)"; rm -f "$IDFILE"; echo "[pod] deleted (volume + data kept)" ;;
+  *)     echo "usage: ./pod {up|train [VAR=val ...]|tail|ssh|down}" ;;
+esac
