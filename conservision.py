@@ -3,7 +3,8 @@ from google.colab import drive
 drive.mount('/content/drive')
 
 # %%
-!pip install -q pytorch_pretrained_vit
+import subprocess, sys
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pytorch_pretrained_vit"])
 
 # %%
 import os, shutil
