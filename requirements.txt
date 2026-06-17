@@ -1,5 +1,5 @@
 # torch/torchvision come from the GCP Deep Learning image (CUDA-matched) — don't pin here.
-# fovea is private; bootstrap.sh installs it via GH_PAT.
+# fovea (private) is pip-installed over ssh by bootstrap.sh — box ssh key must be on GitHub.
 pytorch_pretrained_vit
 huggingface_hub
 opencv-python-headless
