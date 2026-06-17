@@ -1,5 +1,6 @@
-# torch/torchvision come from the GCP Deep Learning image (CUDA-matched) — don't pin here.
-# fovea (private) is pip-installed over ssh by bootstrap.sh — box ssh key must be on GitHub.
+# torch comes from the GCP Deep Learning image (CUDA-matched). Everything else here:
+#   pip install -r requirements.txt
+torchvision
 pytorch_pretrained_vit
 huggingface_hub
 opencv-python-headless
@@ -7,3 +8,4 @@ pandas
 numpy
 scikit-learn
 tqdm
+fovea @ git+ssh://git@github.com/ozogxyz/fovea.git

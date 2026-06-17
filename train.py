@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import cv2
@@ -15,15 +16,25 @@ from sklearn.metrics import log_loss
 
 from fovea import LoRA_ViT, ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
-DATA_DIR = os.environ.get("DATA_DIR", "data")
-OUT = os.environ.get("OUT", "best.pth")
-RANK = int(os.environ.get("RANK", 8))
+p = argparse.ArgumentParser()
+p.add_argument("--data-dir", default="data")
+p.add_argument("--out", default="best.pth")
+p.add_argument("--rank", type=int, default=8)
+p.add_argument("--frac", type=float, default=1.0)
+p.add_argument("--epochs", type=int, default=5)
+p.add_argument("--lr", type=float, default=1e-3)
+p.add_argument("--batch", type=int, default=32)
+args = p.parse_args()
+
+DATA_DIR = args.data_dir
+OUT = args.out
+RANK = args.rank
 NUM_CLASSES = 8
-FRAC = float(os.environ.get("FRAC", 1.0))
+FRAC = args.frac
 TEST_SIZE = 0.25
-EPOCHS = int(os.environ.get("EPOCHS", 5))
-LR = float(os.environ.get("LR", 1e-3))
-BATCH_SIZE = int(os.environ.get("BATCH", 32))
+EPOCHS = args.epochs
+LR = args.lr
+BATCH_SIZE = args.batch
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.1
 SEED = 1
