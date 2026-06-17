@@ -5,6 +5,9 @@ set -e
 set -a; [ -f .env ] && . ./.env; set +a
 
 pip install -q -r requirements.txt
+# image ships torch but not torchvision — add the wheel matching torch's CUDA
+python3 -c "import torchvision" 2>/dev/null || \
+  pip install -q torchvision --index-url "https://download.pytorch.org/whl/cu$(python3 -c 'import torch;print(torch.version.cuda.replace(".",""))')"
 pip install -q "git+ssh://git@github.com/ozogxyz/fovea.git"
 
 # conservision data from HF, once
