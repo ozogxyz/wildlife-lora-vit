@@ -8,4 +8,4 @@ pandas
 numpy
 scikit-learn
 tqdm
-fovea @ git+ssh://git@github.com/ozogxyz/fovea.git
+git+ssh://git@github.com/ozogxyz/fovea.git
