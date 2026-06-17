@@ -1,6 +1,7 @@
-_pycache__/
+__pycache__/
 *.pyc
-model.pth
+*.pth
+data/
 submission_df.csv
 outputs/
 

@@ -15,9 +15,8 @@ from sklearn.metrics import log_loss
 
 from fovea import LoRA_ViT, ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
-DATA_DIR = os.environ.get("DATA_DIR", "/workspace/data")
-OUT = os.environ.get("OUT", "/workspace/best.pth")
-os.environ.setdefault("TORCH_HOME", "/workspace/.torch")  # cache ViT weights on the volume
+DATA_DIR = os.environ.get("DATA_DIR", "data")
+OUT = os.environ.get("OUT", "best.pth")
 RANK = int(os.environ.get("RANK", 8))
 NUM_CLASSES = 8
 FRAC = float(os.environ.get("FRAC", 1.0))
