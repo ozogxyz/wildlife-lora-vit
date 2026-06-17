@@ -1,2 +1,2 @@
-;; M-x compile prefills this; `g` in *compilation* re-runs.
-((nil . ((compile-command . "python3 train.py --frac 0.01 --epochs 2"))))
+;; M-x compile prefills this; `g` re-runs. Runs on the VM over ssh (~0.6s), not TRAMP's slow async.
+((nil . ((compile-command . "make run"))))
