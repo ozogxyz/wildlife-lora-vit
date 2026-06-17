@@ -14,7 +14,8 @@ from pytorch_pretrained_vit import ViT
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.metrics import log_loss
 
-from fovea import LoRA_ViT, ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
+from lora import LoRA_ViT
+from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
 p = argparse.ArgumentParser()
 p.add_argument("--data-dir", default="data")

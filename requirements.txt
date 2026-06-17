@@ -4,8 +4,9 @@ torchvision
 pytorch_pretrained_vit
 huggingface_hub
 opencv-python-headless
+pillow
+scipy
 pandas
 numpy
 scikit-learn
 tqdm
-git+ssh://git@github.com/ozogxyz/fovea.git
