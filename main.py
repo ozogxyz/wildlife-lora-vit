@@ -32,10 +32,11 @@ p.add_argument("--fold", type=int, default=0, help="which site-fold (0..4) to ho
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--epochs", type=int, default=10)
 p.add_argument("--frac", type=float, default=1.0, help="data fraction, for quick smoke runs")
+p.add_argument("--img-size", type=int, default=224, help="input res; DINOv2 patch14 wants a multiple of 14 (224/392/518)")
 args = p.parse_args()
 
 BACKBONE = "vit_base_patch14_dinov2.lvd142m"
-IMG_SIZE = 224  # multiple of 14 -> 16x16 patches
+IMG_SIZE = args.img_size  # patch14: 224->16x16, 392->28x28, 518->37x37 (pos-emb interpolated)
 BATCH = 32
 FOLDS = 5
 NUM_CLASSES = 8
@@ -52,7 +53,7 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-TAG = f"dino_lr{args.lr}_f{args.fold}"
+TAG = f"dino_lr{args.lr}_img{IMG_SIZE}_f{args.fold}"
 if args.frac < 1.0:
     TAG += f"_frac{args.frac}"
 REPO = os.path.dirname(os.path.abspath(__file__))
