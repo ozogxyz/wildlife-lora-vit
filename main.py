@@ -22,7 +22,7 @@ from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 #  model, predict the test set. The ONE non-standard thing that matters:
 #  validation is held out BY SITE (test sites are unseen; a random split
 #  leaks per-site backgrounds and lies about the score). Plus aug.py's
-#  cross-domain augmentations. Backbone: frozen DINOv2 ViT-B/14 + linear head.
+#  cross-domain augmentations. Backbone: DINOv2 ViT-B/14, top blocks fine-tuned, + linear head.
 # ============================================================
 
 p = argparse.ArgumentParser()
@@ -39,6 +39,7 @@ VAL_FRAC = 0.2  # hold out 20% of sites for validation
 NUM_CLASSES = 8
 LABEL_SMOOTHING = 0.1
 WEIGHT_DECAY = 1e-5
+UNFREEZE = 4  # fine-tune the top N DINOv2 blocks (rest frozen); their lr = head lr / 10
 MEAN = [0.485, 0.456, 0.406]  # DINOv2 uses ImageNet normalization
 STD = [0.229, 0.224, 0.225]
 
@@ -50,7 +51,7 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-TAG = f"dino_lr{args.lr}_img{IMG_SIZE}"
+TAG = f"dino_ft{UNFREEZE}_lr{args.lr}_img{IMG_SIZE}"
 REPO = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(REPO, "assets", f"best_{TAG}.pth")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -125,13 +126,23 @@ val_dl = DataLoader(  # no shuffle: logits come back in val order
     batch_size=BATCH, num_workers=workers, pin_memory=True,
 )
 
-# ---------- model: frozen DINOv2 + linear head ----------
+# ---------- model: DINOv2 backbone (top UNFREEZE blocks fine-tuned) + linear head ----------
 backbone = timm.create_model(BACKBONE, pretrained=True, num_classes=0, img_size=IMG_SIZE)
 for w in backbone.parameters():
     w.requires_grad = False
-model = nn.Sequential(backbone, nn.Linear(backbone.num_features, NUM_CLASSES)).to(device)
+for blk in backbone.blocks[-UNFREEZE:]:  # unfreeze the top N transformer blocks
+    for w in blk.parameters():
+        w.requires_grad = True
+head = nn.Linear(backbone.num_features, NUM_CLASSES)
+model = nn.Sequential(backbone, head).to(device)
 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-optimizer = torch.optim.AdamW([w for w in model.parameters() if w.requires_grad], lr=args.lr, weight_decay=WEIGHT_DECAY)
+optimizer = torch.optim.AdamW(  # discriminative LR: backbone slow, head fast
+    [
+        {"params": [w for w in backbone.parameters() if w.requires_grad], "lr": args.lr / 10},
+        {"params": head.parameters(), "lr": args.lr},
+    ],
+    weight_decay=WEIGHT_DECAY,
+)
 
 
 def train_one_epoch():
