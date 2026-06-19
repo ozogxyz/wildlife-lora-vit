@@ -162,7 +162,7 @@ for epoch in range(1, args.epochs + 1):
     if val_ll < best_ll:
         best_ll = val_ll
         best_logits = logits
-        torch.save(model.state_dict(), OUT)
+        torch.save({"state_dict": model.state_dict(), "rank": args.rank, "targets": args.lora_targets}, OUT)
 
 # ---------- extras: calibration temperature + class-collapse check (run once) ----------
 grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
