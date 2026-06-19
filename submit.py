@@ -52,7 +52,7 @@ class Images(Dataset):
 
 loader = DataLoader(Images(test.filepath), batch_size=BATCH, num_workers=workers, pin_memory=True)
 
-backbone = ViT("B_16", pretrained=True, image_size=IMG_SIZE)
+backbone = ViT("B_16", pretrained=True)  # native 224; dataset resizes to IMG_SIZE
 model = LoRA_ViT(backbone, r=args.rank, num_classes=NUM_CLASSES, targets=TARGET_PRESETS[args.lora_targets]).to(device)
 model.load_state_dict(torch.load(args.ckpt, map_location=device))
 model.eval()

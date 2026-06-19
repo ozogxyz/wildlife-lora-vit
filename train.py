@@ -122,7 +122,7 @@ val_dl = DataLoader(  # no shuffle: logits come back in val_labels order
 truth = val_labels[species].values.argmax(axis=1)  # true class index (0..7) per val row
 
 # ---------- model: frozen ViT + LoRA adapters + new 8-way head ----------
-backbone = ViT("B_16", pretrained=True, image_size=IMG_SIZE)
+backbone = ViT("B_16", pretrained=True)  # native 224; dataset resizes to IMG_SIZE
 model = LoRA_ViT(backbone, r=args.rank, num_classes=NUM_CLASSES, targets=TARGET_PRESETS[args.lora_targets]).to(device)
 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = torch.optim.AdamW([w for w in model.parameters() if w.requires_grad], lr=args.lr, weight_decay=WEIGHT_DECAY)
