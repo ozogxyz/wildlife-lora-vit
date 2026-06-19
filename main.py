@@ -51,8 +51,12 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
+TAG = f"{args.lora_targets}_r{args.rank}_lr{args.lr}_f{args.fold}"
+if args.frac < 1.0:
+    TAG += f"_frac{args.frac}"  # keep smoke runs from clobbering real ones
+
 REPO = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(REPO, "assets", "best.pth")
+OUT = os.path.join(REPO, "assets", f"best_{TAG}.pth")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 # ---------- data ----------
@@ -186,5 +190,6 @@ probs = []
 with torch.no_grad():
     for batch in tqdm(test_dl):
         probs += torch.softmax(model(batch["image"].to(device)) / temp, dim=1).tolist()
-pd.DataFrame(probs, index=test_paths.index, columns=species)[sub.columns].to_csv("submission.csv")
-print(f"wrote {os.path.abspath('submission.csv')}  ({len(probs)} rows, temp {temp})")
+out_csv = f"submission_{TAG}.csv"
+pd.DataFrame(probs, index=test_paths.index, columns=species)[sub.columns].to_csv(out_csv)
+print(f"wrote {os.path.abspath(out_csv)}  ({len(probs)} rows, temp {temp})")
