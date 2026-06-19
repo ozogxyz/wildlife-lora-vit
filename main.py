@@ -18,32 +18,28 @@ from sklearn.metrics import log_loss
 from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
 # ============================================================
-#  The two parts that make this solution different:
-#    (1) StratifiedGroupKFold — validate on UNSEEN, class-balanced site
-#        folds. Test sites are disjoint from train; a random split would
-#        leak per-site backgrounds and give a dishonest score.
-#    (2) aug.py — custom cross-domain augmentations (train only).
-#  Backbone: frozen DINOv2 ViT-B/14 (strong domain-robust self-supervised
-#  features) + a linear head. Everything else is textbook transfer learning.
+#  Standard transfer-learning flow: train, save the lowest-val-loss
+#  model, predict the test set. The ONE non-standard thing that matters:
+#  validation is held out BY SITE (test sites are unseen; a random split
+#  leaks per-site backgrounds and lies about the score). Plus aug.py's
+#  cross-domain augmentations. Backbone: frozen DINOv2 ViT-B/14 + linear head.
 # ============================================================
 
 p = argparse.ArgumentParser()
-p.add_argument("--fold", type=int, default=0, help="site-fold (0..4) to hold out as val; -1 = train on ALL data (no val)")
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--epochs", type=int, default=10)
+p.add_argument("--img-size", type=int, default=224, help="DINOv2 patch14: a multiple of 14 (224/392/518)")
 p.add_argument("--frac", type=float, default=1.0, help="data fraction, for quick smoke runs")
-p.add_argument("--img-size", type=int, default=224, help="input res; DINOv2 patch14 wants a multiple of 14 (224/392/518)")
-p.add_argument("--temp", type=float, default=1.0, help="test-time temperature for --fold -1 (all-data); in fold mode it's auto-fit on val")
 args = p.parse_args()
 
 BACKBONE = "vit_base_patch14_dinov2.lvd142m"
-IMG_SIZE = args.img_size  # patch14: 224->16x16, 392->28x28, 518->37x37 (pos-emb interpolated)
+IMG_SIZE = args.img_size
 BATCH = 32
-FOLDS = 5
+VAL_FRAC = 0.2  # hold out 20% of sites for validation
 NUM_CLASSES = 8
 LABEL_SMOOTHING = 0.1
 WEIGHT_DECAY = 1e-5
-MEAN = [0.485, 0.456, 0.406]  # DINOv2 uses ImageNet normalization (NOT 0.5/0.5)
+MEAN = [0.485, 0.456, 0.406]  # DINOv2 uses ImageNet normalization
 STD = [0.229, 0.224, 0.225]
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,10 +50,7 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-fold_tag = "all" if args.fold < 0 else f"f{args.fold}"
-TAG = f"dino_lr{args.lr}_img{IMG_SIZE}_{fold_tag}"
-if args.frac < 1.0:
-    TAG += f"_frac{args.frac}"
+TAG = f"dino_lr{args.lr}_img{IMG_SIZE}"
 REPO = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(REPO, "assets", f"best_{TAG}.pth")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -73,23 +66,20 @@ features = features.loc[labels.index]
 paths = features.filepath
 sites = features.site
 
-# (1) site-grouped + class-stratified split — sites disjoint, class mix balanced.
-#     --fold -1 trains on ALL data (no validation).
-n_folds = min(FOLDS, sites.nunique())
+# hold out 20% of SITES for validation (a random split would leak per-site backgrounds)
 y = labels[species].values.argmax(1)
-if args.fold < 0:
-    train_idx, val_idx = np.arange(len(paths)), None
-else:
-    train_idx, val_idx = list(StratifiedGroupKFold(n_splits=n_folds).split(paths, y, groups=sites))[args.fold]
+train_idx, val_idx = next(StratifiedGroupKFold(n_splits=round(1 / VAL_FRAC)).split(paths, y, groups=sites))
+val_labels = labels.iloc[val_idx]
+truth = val_labels[species].values.argmax(1)
 
 print(
     f"device {device}  workers {workers}  frac {args.frac}  epochs {args.epochs}  lr {args.lr}  "
-    f"backbone dinov2-b14  img {IMG_SIZE}  fold {args.fold}/{n_folds} ({sites.nunique()} sites)"
+    f"backbone dinov2-b14  img {IMG_SIZE}  train {len(train_idx)} / val {len(val_idx)} ({sites.nunique()} sites)"
 )
 
 
 # ---------- dataset ----------
-def make_aug():  # (2) thesis augmentations — train only
+def make_aug():  # cross-domain augmentations — train only
     return Compose(
         [
             ColorJitterCV(brightness=0.8, contrast=0.1, gamma=0.2, temp=0.8, p=0.75),
@@ -130,14 +120,10 @@ train_dl = DataLoader(
     Images(paths.iloc[train_idx], labels.iloc[train_idx], train=True),
     batch_size=BATCH, shuffle=True, num_workers=workers, pin_memory=True,
 )
-val_dl, truth = None, None
-if val_idx is not None:
-    val_labels = labels.iloc[val_idx]
-    val_dl = DataLoader(  # no shuffle: logits come back in val_labels order
-        Images(paths.iloc[val_idx], val_labels),
-        batch_size=BATCH, num_workers=workers, pin_memory=True,
-    )
-    truth = val_labels[species].values.argmax(1)  # true class index (0..7) per val row
+val_dl = DataLoader(  # no shuffle: logits come back in val order
+    Images(paths.iloc[val_idx], val_labels),
+    batch_size=BATCH, num_workers=workers, pin_memory=True,
+)
 
 # ---------- model: frozen DINOv2 + linear head ----------
 backbone = timm.create_model(BACKBONE, pretrained=True, num_classes=0, img_size=IMG_SIZE)
@@ -148,7 +134,6 @@ criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = torch.optim.AdamW([w for w in model.parameters() if w.requires_grad], lr=args.lr, weight_decay=WEIGHT_DECAY)
 
 
-# ---------- standard train / eval ----------
 def train_one_epoch():
     model.train()
     total = 0.0
@@ -169,40 +154,31 @@ def evaluate():
         for batch in val_dl:
             chunks.append(model(batch["image"].to(device)).cpu())
     logits = torch.cat(chunks).numpy()
-    ll = log_loss(truth, softmax(logits, axis=1), labels=list(range(NUM_CLASSES)))
-    return ll, logits
+    return log_loss(truth, softmax(logits, axis=1), labels=list(range(NUM_CLASSES))), logits
 
 
+# ---------- train, save the lowest-val-loss model ----------
 best_ll = float("inf")
 best_logits = None
 for epoch in range(1, args.epochs + 1):
     train_loss = train_one_epoch()
-    if val_dl is None:  # all-data: no validation, just keep the latest weights
-        print(f"epoch {epoch:2d}  train_loss {train_loss:.4f}  (all-data, no val)")
-        torch.save(model.state_dict(), OUT)
-        continue
     val_ll, logits = evaluate()
     print(f"epoch {epoch:2d}  train_loss {train_loss:.4f}  val_logloss {val_ll:.4f}")
     if val_ll < best_ll:
-        best_ll = val_ll
-        best_logits = logits
+        best_ll, best_logits = val_ll, logits
         torch.save(model.state_dict(), OUT)
 
-# ---------- calibration temperature + class-collapse check (needs val) ----------
-if val_dl is not None:
-    grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
-    cal_ll, temp = min((log_loss(truth, softmax(best_logits / t, axis=1), labels=list(range(NUM_CLASSES))), t) for t in grid)
-    print(f"best {best_ll:.4f}  temp {temp}  calibrated {cal_ll:.4f}  saved {OUT}")
-    pred = best_logits.argmax(axis=1)
-    for i, sp in enumerate(species):
-        mask = truth == i
-        acc = (pred[mask] == i).mean() if mask.sum() else 0.0
-        print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
-else:
-    temp = args.temp
-    print(f"all-data: trained {args.epochs} epochs, saved {OUT}, using temp {temp}")
+# ---------- calibrate (temperature) on val + class-collapse check ----------
+grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
+cal_ll, temp = min((log_loss(truth, softmax(best_logits / t, axis=1), labels=list(range(NUM_CLASSES))), t) for t in grid)
+print(f"best {best_ll:.4f}  temp {temp}  calibrated {cal_ll:.4f}  saved {OUT}")
+pred = best_logits.argmax(axis=1)
+for i, sp in enumerate(species):
+    mask = truth == i
+    acc = (pred[mask] == i).mean() if mask.sum() else 0.0
+    print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
 
-# ---------- predict the test set: best epoch + the temp we just fit ----------
+# ---------- predict the test set with the saved (best) model + fitted temp ----------
 model.load_state_dict(torch.load(OUT))
 model.eval()
 sub = pd.read_csv("submission_format.csv", index_col="id")
