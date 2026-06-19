@@ -12,7 +12,7 @@ from torchvision.transforms import Compose
 from tqdm import tqdm
 from scipy.special import softmax
 from pytorch_pretrained_vit import ViT
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.metrics import log_loss
 
 from lora import LoRA_ViT, TARGET_PRESETS
@@ -20,9 +20,9 @@ from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
 # ============================================================
 #  The following two parts make this solution different: 
-#    (1) GroupKFold — validate on UNSEEN camera sites. Test sites are
-#        disjoint from train; a random split would leak per-site
-#        backgrounds and give a dishonest score.
+#    (1) StratifiedGroupKFold — validate on UNSEEN camera sites (disjoint
+#        from train) with a balanced class mix per fold. A random split would
+#        leak per-site backgrounds and give a dishonest score.
 #    (2) aug.py     — custom cross-domain augmentations (train only)
 #  Everything else is textbook transfer learning.
 # ============================================================
@@ -46,7 +46,7 @@ WEIGHT_DECAY = 1e-5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 workers = os.cpu_count() or 2
 
-SEED = 1  # seed init/aug/shuffle so the SAME config reproduces (else ~0.08 logloss run-to-run noise)
+SEED = 1
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -66,9 +66,10 @@ features = features.loc[labels.index]
 paths = features.filepath
 sites = features.site
 
-# (1) SITE-grouped split — every site lands entirely in train OR val, never both
+# (1) SITE-grouped + class-stratified split — sites stay disjoint, class mix stays balanced across folds
 n_folds = min(FOLDS, sites.nunique())
-train_idx, val_idx = list(GroupKFold(n_splits=n_folds).split(paths, labels, groups=sites))[args.fold]
+y = labels[species].values.argmax(1)  # 1-D class index per row, for stratification
+train_idx, val_idx = list(StratifiedGroupKFold(n_splits=n_folds).split(paths, y, groups=sites))[args.fold]
 
 print(
     f"device {device}  workers {workers}  frac {args.frac}  epochs {args.epochs}  lr {args.lr}  "
@@ -77,7 +78,7 @@ print(
 
 
 # ---------- dataset ----------
-def make_aug():  # (2) thesis augmentations — train only
+def make_aug():  # (2) custom augmentations — train only
     return Compose(
         [
             ColorJitterCV(brightness=0.8, contrast=0.1, gamma=0.2, temp=0.8, p=0.75),
@@ -91,7 +92,7 @@ class Images(Dataset):
     def __init__(self, paths, labels=None, train=False):
         self.paths = paths
         self.labels = labels
-        self.aug = make_aug() if train else None  # val gets clean preprocessing, no random aug
+        self.aug = make_aug() if train else None
 
     def __len__(self):
         return len(self.paths)
@@ -101,7 +102,7 @@ class Images(Dataset):
         img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
         if self.aug:
             img = self.aug({"image": img})["image"]
-        img = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2RGB)  # .copy(): aug may return a flipped view
+        img = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2RGB)
         img = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
         img = (img - 0.5) / 0.5
         sample = {"image": img}
@@ -115,14 +116,14 @@ train_dl = DataLoader(
     batch_size=BATCH, shuffle=True, num_workers=workers, pin_memory=True,
 )
 val_labels = labels.iloc[val_idx]
-val_dl = DataLoader(  # no shuffle: logits come back in val_labels order
+val_dl = DataLoader(
     Images(paths.iloc[val_idx], val_labels),
     batch_size=BATCH, num_workers=workers, pin_memory=True,
 )
-truth = val_labels[species].values.argmax(axis=1)  # true class index (0..7) per val row
+truth = val_labels[species].values.argmax(axis=1)
 
 # ---------- model: frozen ViT + LoRA adapters + new 8-way head ----------
-backbone = ViT("B_16", pretrained=True)  # native 224; dataset resizes to IMG_SIZE
+backbone = ViT("B_16", pretrained=True)
 model = LoRA_ViT(backbone, r=args.rank, num_classes=NUM_CLASSES, targets=TARGET_PRESETS[args.lora_targets]).to(device)
 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = torch.optim.AdamW([w for w in model.parameters() if w.requires_grad], lr=args.lr, weight_decay=WEIGHT_DECAY)
@@ -176,7 +177,7 @@ for i, sp in enumerate(species):
     print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
 
 # ---------- predict the test set: best epoch + the temp we just fit (overwrites; we're experimenting) ----------
-model.load_state_dict(torch.load(OUT))  # roll back to the best epoch (in-memory model is the last, maybe overfit)
+model.load_state_dict(torch.load(OUT))
 model.eval()
 sub = pd.read_csv("submission_format.csv", index_col="id")
 test_paths = pd.read_csv("test_features.csv", index_col="id").loc[sub.index].filepath
@@ -185,6 +186,5 @@ probs = []
 with torch.no_grad():
     for batch in tqdm(test_dl):
         probs += torch.softmax(model(batch["image"].to(device)) / temp, dim=1).tolist()
-# label columns by the model's output order (species), then reorder to submission order BY NAME
 pd.DataFrame(probs, index=test_paths.index, columns=species)[sub.columns].to_csv("submission.csv")
 print(f"wrote {os.path.abspath('submission.csv')}  ({len(probs)} rows, temp {temp})")
