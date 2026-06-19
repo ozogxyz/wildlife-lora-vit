@@ -162,7 +162,7 @@ for epoch in range(1, args.epochs + 1):
     if val_ll < best_ll:
         best_ll = val_ll
         best_logits = logits
-        torch.save({"state_dict": model.state_dict(), "rank": args.rank, "targets": args.lora_targets}, OUT)
+        torch.save(model.state_dict(), OUT)
 
 # ---------- extras: calibration temperature + class-collapse check (run once) ----------
 grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
@@ -174,3 +174,16 @@ for i, sp in enumerate(species):
     mask = truth == i
     acc = (pred[mask] == i).mean() if mask.sum() else 0.0
     print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
+
+# ---------- predict the test set: best epoch + the temp we just fit (overwrites; we're experimenting) ----------
+model.load_state_dict(torch.load(OUT))  # roll back to the best epoch (in-memory model is the last, maybe overfit)
+model.eval()
+sub = pd.read_csv("submission_format.csv", index_col="id")
+test_paths = pd.read_csv("test_features.csv", index_col="id").loc[sub.index].filepath
+test_dl = DataLoader(Images(test_paths), batch_size=BATCH, num_workers=workers, pin_memory=True)
+probs = []
+with torch.no_grad():
+    for batch in tqdm(test_dl):
+        probs += torch.softmax(model(batch["image"].to(device)) / temp, dim=1).tolist()
+pd.DataFrame(probs, index=test_paths.index, columns=sub.columns).to_csv("submission.csv")
+print(f"wrote {os.path.abspath('submission.csv')}  ({len(probs)} rows, temp {temp})")
