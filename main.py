@@ -185,5 +185,6 @@ probs = []
 with torch.no_grad():
     for batch in tqdm(test_dl):
         probs += torch.softmax(model(batch["image"].to(device)) / temp, dim=1).tolist()
-pd.DataFrame(probs, index=test_paths.index, columns=sub.columns).to_csv("submission.csv")
+# label columns by the model's output order (species), then reorder to submission order BY NAME
+pd.DataFrame(probs, index=test_paths.index, columns=species)[sub.columns].to_csv("submission.csv")
 print(f"wrote {os.path.abspath('submission.csv')}  ({len(probs)} rows, temp {temp})")

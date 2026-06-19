@@ -13,5 +13,7 @@ The dataset's real difficulty is its site structure, not the eight classes. Each
 camera contributes long runs of near-identical frames, so a random split leaks
 backgrounds across train and validation and inflates the score, while the held-out
 test set is entirely unseen cameras. Validation here is grouped by site, so the
-metric reflects the only thing that transfers. Class-weighted loss and light
-augmentation cover the tail (bird, hog, civet, rodent).
+metric reflects the only thing that transfers. Loss is plain cross-entropy with
+label smoothing — no class weighting, since the metric is unweighted log loss and
+reweighting only miscalibrates it — and predictions are temperature-scaled on the
+validation fold for log loss.
