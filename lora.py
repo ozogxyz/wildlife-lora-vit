@@ -9,6 +9,13 @@ from torch import Tensor, nn
 #   https://github.com/lukemelas/PyTorch-Pretrained-ViT  (pip install pytorch_pretrained_vit)
 
 
+TARGET_PRESETS = {
+    "qv": [("attn", "proj_q"), ("attn", "proj_v")],
+    "qkv": [("attn", "proj_q"), ("attn", "proj_k"), ("attn", "proj_v")],
+    "qkvm": [("attn", "proj_q"), ("attn", "proj_k"), ("attn", "proj_v"), ("pwff", "fc1"), ("pwff", "fc2")],
+}
+
+
 class _LoRALayer(nn.Module):
     def __init__(self, w: nn.Module, w_a: nn.Module, w_b: nn.Module):
         super().__init__()
@@ -37,9 +44,10 @@ class LoRA_ViT(nn.Module):
 
     TARGETS = [("attn", "proj_q"), ("attn", "proj_v")]
 
-    def __init__(self, vit_model: ViT, r: int, num_classes: int = 0, lora_layer=None):
+    def __init__(self, vit_model: ViT, r: int, num_classes: int = 0, lora_layer=None, targets=None):
         super().__init__()
         assert r > 0
+        self.targets = targets if targets is not None else self.TARGETS
 
         if lora_layer:
             self.lora_layer = lora_layer
@@ -55,7 +63,7 @@ class LoRA_ViT(nn.Module):
         for i, blk in enumerate(vit_model.transformer.blocks):
             if i not in self.lora_layer:
                 continue
-            for sub, name in self.TARGETS:
+            for sub, name in self.targets:
                 parent = getattr(blk, sub)
                 linear = getattr(parent, name)
                 w_a = nn.Linear(linear.in_features, r, bias=False)
