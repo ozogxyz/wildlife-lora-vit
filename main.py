@@ -5,43 +5,44 @@ import random
 import cv2
 import numpy as np
 import pandas as pd
+import timm
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import Compose
 from tqdm import tqdm
 from scipy.special import softmax
-from pytorch_pretrained_vit import ViT
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.metrics import log_loss
 
-from lora import LoRA_ViT, TARGET_PRESETS
 from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
 # ============================================================
-#  The following two parts make this solution different: 
-#    (1) StratifiedGroupKFold — validate on UNSEEN camera sites (disjoint
-#        from train) with a balanced class mix per fold. A random split would
+#  The two parts that make this solution different:
+#    (1) StratifiedGroupKFold — validate on UNSEEN, class-balanced site
+#        folds. Test sites are disjoint from train; a random split would
 #        leak per-site backgrounds and give a dishonest score.
-#    (2) aug.py     — custom cross-domain augmentations (train only)
-#  Everything else is textbook transfer learning.
+#    (2) aug.py — custom cross-domain augmentations (train only).
+#  Backbone: frozen DINOv2 ViT-B/14 (strong domain-robust self-supervised
+#  features) + a linear head. Everything else is textbook transfer learning.
 # ============================================================
 
 p = argparse.ArgumentParser()
 p.add_argument("--fold", type=int, default=0, help="which site-fold (0..4) to hold out as validation")
-p.add_argument("--lora-targets", choices=list(TARGET_PRESETS), default="qv")
-p.add_argument("--rank", type=int, default=4)
-p.add_argument("--lr", type=float, default=5e-4)
+p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--epochs", type=int, default=10)
 p.add_argument("--frac", type=float, default=1.0, help="data fraction, for quick smoke runs")
 args = p.parse_args()
 
-IMG_SIZE = 224
+BACKBONE = "vit_base_patch14_dinov2.lvd142m"
+IMG_SIZE = 224  # multiple of 14 -> 16x16 patches
 BATCH = 32
 FOLDS = 5
 NUM_CLASSES = 8
 LABEL_SMOOTHING = 0.1
 WEIGHT_DECAY = 1e-5
+MEAN = [0.485, 0.456, 0.406]  # DINOv2 uses ImageNet normalization (NOT 0.5/0.5)
+STD = [0.229, 0.224, 0.225]
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 workers = os.cpu_count() or 2
@@ -51,10 +52,9 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-TAG = f"{args.lora_targets}_r{args.rank}_lr{args.lr}_f{args.fold}"
+TAG = f"dino_lr{args.lr}_f{args.fold}"
 if args.frac < 1.0:
-    TAG += f"_frac{args.frac}"  # keep smoke runs from clobbering real ones
-
+    TAG += f"_frac{args.frac}"
 REPO = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(REPO, "assets", f"best_{TAG}.pth")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -70,19 +70,19 @@ features = features.loc[labels.index]
 paths = features.filepath
 sites = features.site
 
-# (1) SITE-grouped + class-stratified split — sites stay disjoint, class mix stays balanced across folds
+# (1) site-grouped + class-stratified split — sites disjoint, class mix balanced
 n_folds = min(FOLDS, sites.nunique())
-y = labels[species].values.argmax(1)  # 1-D class index per row, for stratification
+y = labels[species].values.argmax(1)
 train_idx, val_idx = list(StratifiedGroupKFold(n_splits=n_folds).split(paths, y, groups=sites))[args.fold]
 
 print(
     f"device {device}  workers {workers}  frac {args.frac}  epochs {args.epochs}  lr {args.lr}  "
-    f"rank {args.rank}  lora {args.lora_targets}  fold {args.fold}/{n_folds} ({sites.nunique()} sites)"
+    f"backbone dinov2-b14  fold {args.fold}/{n_folds} ({sites.nunique()} sites)"
 )
 
 
 # ---------- dataset ----------
-def make_aug():  # (2) custom augmentations — train only
+def make_aug():  # (2) thesis augmentations — train only
     return Compose(
         [
             ColorJitterCV(brightness=0.8, contrast=0.1, gamma=0.2, temp=0.8, p=0.75),
@@ -92,11 +92,15 @@ def make_aug():  # (2) custom augmentations — train only
     )
 
 
+mean = torch.tensor(MEAN).view(3, 1, 1)
+std = torch.tensor(STD).view(3, 1, 1)
+
+
 class Images(Dataset):
     def __init__(self, paths, labels=None, train=False):
         self.paths = paths
         self.labels = labels
-        self.aug = make_aug() if train else None
+        self.aug = make_aug() if train else None  # val/test: clean preprocessing, no random aug
 
     def __len__(self):
         return len(self.paths)
@@ -106,9 +110,9 @@ class Images(Dataset):
         img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
         if self.aug:
             img = self.aug({"image": img})["image"]
-        img = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2RGB)
+        img = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2RGB)  # .copy(): aug may return a flipped view
         img = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
-        img = (img - 0.5) / 0.5
+        img = (img - mean) / std
         sample = {"image": img}
         if self.labels is not None:
             sample["label"] = torch.tensor(self.labels.iloc[i].values, dtype=torch.float)
@@ -120,15 +124,17 @@ train_dl = DataLoader(
     batch_size=BATCH, shuffle=True, num_workers=workers, pin_memory=True,
 )
 val_labels = labels.iloc[val_idx]
-val_dl = DataLoader(
+val_dl = DataLoader(  # no shuffle: logits come back in val_labels order
     Images(paths.iloc[val_idx], val_labels),
     batch_size=BATCH, num_workers=workers, pin_memory=True,
 )
-truth = val_labels[species].values.argmax(axis=1)
+truth = val_labels[species].values.argmax(1)  # true class index (0..7) per val row
 
-# ---------- model: frozen ViT + LoRA adapters + new 8-way head ----------
-backbone = ViT("B_16", pretrained=True)
-model = LoRA_ViT(backbone, r=args.rank, num_classes=NUM_CLASSES, targets=TARGET_PRESETS[args.lora_targets]).to(device)
+# ---------- model: frozen DINOv2 + linear head ----------
+backbone = timm.create_model(BACKBONE, pretrained=True, num_classes=0, img_size=IMG_SIZE)
+for w in backbone.parameters():
+    w.requires_grad = False
+model = nn.Sequential(backbone, nn.Linear(backbone.num_features, NUM_CLASSES)).to(device)
 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = torch.optim.AdamW([w for w in model.parameters() if w.requires_grad], lr=args.lr, weight_decay=WEIGHT_DECAY)
 
@@ -169,7 +175,7 @@ for epoch in range(1, args.epochs + 1):
         best_logits = logits
         torch.save(model.state_dict(), OUT)
 
-# ---------- extras: calibration temperature + class-collapse check (run once) ----------
+# ---------- extras: calibration temperature + class-collapse check ----------
 grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
 cal_ll, temp = min((log_loss(truth, softmax(best_logits / t, axis=1), labels=list(range(NUM_CLASSES))), t) for t in grid)
 print(f"best {best_ll:.4f}  temp {temp}  calibrated {cal_ll:.4f}  saved {OUT}")
@@ -180,7 +186,7 @@ for i, sp in enumerate(species):
     acc = (pred[mask] == i).mean() if mask.sum() else 0.0
     print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
 
-# ---------- predict the test set: best epoch + the temp we just fit (overwrites; we're experimenting) ----------
+# ---------- predict the test set: best epoch + the temp we just fit ----------
 model.load_state_dict(torch.load(OUT))
 model.eval()
 sub = pd.read_csv("submission_format.csv", index_col="id")
