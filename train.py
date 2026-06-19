@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 
 import cv2
 import numpy as np
@@ -18,11 +19,11 @@ from lora import LoRA_ViT, TARGET_PRESETS
 from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 
 # ============================================================
-#  The ONLY two parts that are mine:
-#    (1) aug.py     — thesis cross-domain augmentations (train only)
-#    (2) GroupKFold — validate on UNSEEN camera sites. Test sites are
+#  The following two parts make this solution different: 
+#    (1) GroupKFold — validate on UNSEEN camera sites. Test sites are
 #        disjoint from train; a random split would leak per-site
 #        backgrounds and give a dishonest score.
+#    (2) aug.py     — custom cross-domain augmentations (train only)
 #  Everything else is textbook transfer learning.
 # ============================================================
 
@@ -45,6 +46,11 @@ WEIGHT_DECAY = 1e-5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 workers = os.cpu_count() or 2
 
+SEED = 1  # seed init/aug/shuffle so the SAME config reproduces (else ~0.08 logloss run-to-run noise)
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
 REPO = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(REPO, "assets", "best.pth")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -60,7 +66,7 @@ features = features.loc[labels.index]
 paths = features.filepath
 sites = features.site
 
-# (2) SITE-grouped split — every site lands entirely in train OR val, never both
+# (1) SITE-grouped split — every site lands entirely in train OR val, never both
 n_folds = min(FOLDS, sites.nunique())
 train_idx, val_idx = list(GroupKFold(n_splits=n_folds).split(paths, labels, groups=sites))[args.fold]
 
@@ -71,7 +77,7 @@ print(
 
 
 # ---------- dataset ----------
-def make_aug():  # (1) thesis augmentations — train only
+def make_aug():  # (2) thesis augmentations — train only
     return Compose(
         [
             ColorJitterCV(brightness=0.8, contrast=0.1, gamma=0.2, temp=0.8, p=0.75),
