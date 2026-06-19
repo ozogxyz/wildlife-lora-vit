@@ -28,11 +28,12 @@ from aug import ColorJitterCV, RandomGaussianBlur, RandomHorizontalFlip
 # ============================================================
 
 p = argparse.ArgumentParser()
-p.add_argument("--fold", type=int, default=0, help="which site-fold (0..4) to hold out as validation")
+p.add_argument("--fold", type=int, default=0, help="site-fold (0..4) to hold out as val; -1 = train on ALL data (no val)")
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--epochs", type=int, default=10)
 p.add_argument("--frac", type=float, default=1.0, help="data fraction, for quick smoke runs")
 p.add_argument("--img-size", type=int, default=224, help="input res; DINOv2 patch14 wants a multiple of 14 (224/392/518)")
+p.add_argument("--temp", type=float, default=1.0, help="test-time temperature for --fold -1 (all-data); in fold mode it's auto-fit on val")
 args = p.parse_args()
 
 BACKBONE = "vit_base_patch14_dinov2.lvd142m"
@@ -53,7 +54,8 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-TAG = f"dino_lr{args.lr}_img{IMG_SIZE}_f{args.fold}"
+fold_tag = "all" if args.fold < 0 else f"f{args.fold}"
+TAG = f"dino_lr{args.lr}_img{IMG_SIZE}_{fold_tag}"
 if args.frac < 1.0:
     TAG += f"_frac{args.frac}"
 REPO = os.path.dirname(os.path.abspath(__file__))
@@ -71,14 +73,18 @@ features = features.loc[labels.index]
 paths = features.filepath
 sites = features.site
 
-# (1) site-grouped + class-stratified split — sites disjoint, class mix balanced
+# (1) site-grouped + class-stratified split — sites disjoint, class mix balanced.
+#     --fold -1 trains on ALL data (no validation).
 n_folds = min(FOLDS, sites.nunique())
 y = labels[species].values.argmax(1)
-train_idx, val_idx = list(StratifiedGroupKFold(n_splits=n_folds).split(paths, y, groups=sites))[args.fold]
+if args.fold < 0:
+    train_idx, val_idx = np.arange(len(paths)), None
+else:
+    train_idx, val_idx = list(StratifiedGroupKFold(n_splits=n_folds).split(paths, y, groups=sites))[args.fold]
 
 print(
     f"device {device}  workers {workers}  frac {args.frac}  epochs {args.epochs}  lr {args.lr}  "
-    f"backbone dinov2-b14  fold {args.fold}/{n_folds} ({sites.nunique()} sites)"
+    f"backbone dinov2-b14  img {IMG_SIZE}  fold {args.fold}/{n_folds} ({sites.nunique()} sites)"
 )
 
 
@@ -124,12 +130,14 @@ train_dl = DataLoader(
     Images(paths.iloc[train_idx], labels.iloc[train_idx], train=True),
     batch_size=BATCH, shuffle=True, num_workers=workers, pin_memory=True,
 )
-val_labels = labels.iloc[val_idx]
-val_dl = DataLoader(  # no shuffle: logits come back in val_labels order
-    Images(paths.iloc[val_idx], val_labels),
-    batch_size=BATCH, num_workers=workers, pin_memory=True,
-)
-truth = val_labels[species].values.argmax(1)  # true class index (0..7) per val row
+val_dl, truth = None, None
+if val_idx is not None:
+    val_labels = labels.iloc[val_idx]
+    val_dl = DataLoader(  # no shuffle: logits come back in val_labels order
+        Images(paths.iloc[val_idx], val_labels),
+        batch_size=BATCH, num_workers=workers, pin_memory=True,
+    )
+    truth = val_labels[species].values.argmax(1)  # true class index (0..7) per val row
 
 # ---------- model: frozen DINOv2 + linear head ----------
 backbone = timm.create_model(BACKBONE, pretrained=True, num_classes=0, img_size=IMG_SIZE)
@@ -169,6 +177,10 @@ best_ll = float("inf")
 best_logits = None
 for epoch in range(1, args.epochs + 1):
     train_loss = train_one_epoch()
+    if val_dl is None:  # all-data: no validation, just keep the latest weights
+        print(f"epoch {epoch:2d}  train_loss {train_loss:.4f}  (all-data, no val)")
+        torch.save(model.state_dict(), OUT)
+        continue
     val_ll, logits = evaluate()
     print(f"epoch {epoch:2d}  train_loss {train_loss:.4f}  val_logloss {val_ll:.4f}")
     if val_ll < best_ll:
@@ -176,16 +188,19 @@ for epoch in range(1, args.epochs + 1):
         best_logits = logits
         torch.save(model.state_dict(), OUT)
 
-# ---------- extras: calibration temperature + class-collapse check ----------
-grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
-cal_ll, temp = min((log_loss(truth, softmax(best_logits / t, axis=1), labels=list(range(NUM_CLASSES))), t) for t in grid)
-print(f"best {best_ll:.4f}  temp {temp}  calibrated {cal_ll:.4f}  saved {OUT}")
-
-pred = best_logits.argmax(axis=1)
-for i, sp in enumerate(species):
-    mask = truth == i
-    acc = (pred[mask] == i).mean() if mask.sum() else 0.0
-    print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
+# ---------- calibration temperature + class-collapse check (needs val) ----------
+if val_dl is not None:
+    grid = [0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0]
+    cal_ll, temp = min((log_loss(truth, softmax(best_logits / t, axis=1), labels=list(range(NUM_CLASSES))), t) for t in grid)
+    print(f"best {best_ll:.4f}  temp {temp}  calibrated {cal_ll:.4f}  saved {OUT}")
+    pred = best_logits.argmax(axis=1)
+    for i, sp in enumerate(species):
+        mask = truth == i
+        acc = (pred[mask] == i).mean() if mask.sum() else 0.0
+        print(f"  {sp:18s} acc {acc:.3f}  true {int(mask.sum()):4d}  pred {int((pred == i).sum()):4d}")
+else:
+    temp = args.temp
+    print(f"all-data: trained {args.epochs} epochs, saved {OUT}, using temp {temp}")
 
 # ---------- predict the test set: best epoch + the temp we just fit ----------
 model.load_state_dict(torch.load(OUT))
