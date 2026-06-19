@@ -28,6 +28,7 @@ p.add_argument("--lr", type=float, default=1e-4)
 p.add_argument("--batch", type=int, default=32)
 p.add_argument("--folds", type=int, default=5)
 p.add_argument("--fold", type=int, default=0, help="fold index to run; -1 = all folds (CV), report mean+/-std")
+p.add_argument("--img-size", type=int, default=0, help="ViT input size (interpolates pos emb); 0 = pretrained default (384)")
 args = p.parse_args()
 
 DATA_DIR = args.data_dir
@@ -49,7 +50,13 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 gpu = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
 NUM_WORKERS = os.cpu_count() or 2
 
-backbone = ViT("B_16", pretrained=True)
+def make_backbone():
+    if args.img_size:
+        return ViT("B_16", pretrained=True, image_size=args.img_size)
+    return ViT("B_16", pretrained=True)
+
+
+backbone = make_backbone()
 IMG_SIZE = backbone.image_size
 IMG_SIZE = IMG_SIZE[0] if isinstance(IMG_SIZE, (tuple, list)) else IMG_SIZE
 
@@ -66,7 +73,7 @@ n_folds = min(args.folds, sites.nunique())
 splits = list(GroupKFold(n_splits=n_folds).split(x, y, groups=sites))
 print(
     f"device: {device} ({gpu}), batch {BATCH_SIZE}, workers {NUM_WORKERS}, "
-    f"frac {FRAC}, epochs {EPOCHS}, lr {LR}, rank {RANK}, wd {WEIGHT_DECAY}, "
+    f"frac {FRAC}, epochs {EPOCHS}, lr {LR}, rank {RANK}, wd {WEIGHT_DECAY}, img {IMG_SIZE}, "
     f"{n_folds}-fold groupkfold ({sites.nunique()} sites)"
 )
 
@@ -192,7 +199,7 @@ if args.fold >= 0:
 else:
     raws, cals, Ts = [], [], []
     for fold, (tr, ev) in enumerate(splits):
-        bb = backbone if fold == 0 else ViT("B_16", pretrained=True)
+        bb = backbone if fold == 0 else make_backbone()
         raw, cal, T = run_fold(fold, tr, ev, bb, save=False)
         raws.append(raw)
         cals.append(cal)

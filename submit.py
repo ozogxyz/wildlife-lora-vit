@@ -19,6 +19,7 @@ p.add_argument("--out", default="submission.csv")
 p.add_argument("--rank", type=int, default=4, help="must match the trained checkpoint")
 p.add_argument("--temp", type=float, default=1.0, help="softmax temperature from CV (fold avg)")
 p.add_argument("--tta", action="store_true", help="average probabilities over hflip")
+p.add_argument("--img-size", type=int, default=0, help="must match the trained checkpoint; 0 = pretrained default (384)")
 p.add_argument("--batch", type=int, default=64)
 args = p.parse_args()
 
@@ -29,7 +30,7 @@ NORM_STD = 0.5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_WORKERS = os.cpu_count() or 2
 
-backbone = ViT("B_16", pretrained=True)
+backbone = ViT("B_16", pretrained=True, image_size=args.img_size) if args.img_size else ViT("B_16", pretrained=True)
 IMG_SIZE = backbone.image_size
 IMG_SIZE = IMG_SIZE[0] if isinstance(IMG_SIZE, (tuple, list)) else IMG_SIZE
 
